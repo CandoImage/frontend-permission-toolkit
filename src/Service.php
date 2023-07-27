@@ -9,22 +9,27 @@
  * Full copyright and license information is available in
  * LICENSE.md which is distributed with this source code.
  *
- *  @copyright  Copyright (c) Pimcore GmbH (http://www.pimcore.org)
- *  @license    http://www.pimcore.org/license     GPLv3 and PCL
+ * @copyright  Copyright (c) Pimcore GmbH (http://www.pimcore.org)
+ * @license    http://www.pimcore.org/license     GPLv3 and PCL
  */
 
 namespace FrontendPermissionToolkitBundle;
 
+use Exception;
 use FrontendPermissionToolkitBundle\CoreExtensions\ClassDefinitions\DynamicPermissionResource;
 use FrontendPermissionToolkitBundle\CoreExtensions\ClassDefinitions\PermissionManyToManyRelation;
 use FrontendPermissionToolkitBundle\CoreExtensions\ClassDefinitions\PermissionManyToOneRelation;
 use FrontendPermissionToolkitBundle\CoreExtensions\ClassDefinitions\PermissionResource;
 use FrontendPermissionToolkitBundle\Event\PermissionsEvent;
+use FrontendPermissionToolkitBundle\Interface\CustomPermissionGetterInterface;
+use FrontendPermissionToolkitBundle\Interface\CustomProviderInterface;
 use Pimcore\Model\AbstractModel;
 use Pimcore\Model\DataObject\ClassDefinition;
+use Pimcore\Model\DataObject\ClassDefinition\Data;
 use Pimcore\Model\DataObject\Concrete;
 use Pimcore\Model\DataObject\Objectbrick;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
+use Symfony\Component\Security\Core\User\UserInterface;
 
 class Service
 {
@@ -35,9 +40,9 @@ class Service
     /**
      * @var EventDispatcherInterface
      */
-    protected $eventDispatcher;
+    protected EventDispatcherInterface $eventDispatcher;
 
-    private $permissionCache = [];
+    private array $permissionCache = [];
 
     /**
      * @param EventDispatcherInterface $eventDispatcher
@@ -56,12 +61,19 @@ class Service
      * - otherwise optimistic merging is used -> once one permission is allowed, it stays that way
      *
      *
-     * @param Concrete $object
-     *
+     * @param Concrete|CustomProviderInterface $object
+     * @param array $visitedIds
+     * @param UserInterface|null $user
      * @return array
+     * @throws Exception
      */
-    public function getPermissions(Concrete $object, array $visitedIds = []): array
+    public function getPermissions(Concrete|CustomProviderInterface $object, array $visitedIds = [], ?UserInterface $user = null): array
     {
+        // check if custom permission provider is provided to get permissions with custom implementation
+        if ($object instanceof CustomProviderInterface) {
+            return $this->getCustomPermissions($object, $user);
+
+        }
         if (isset($this->permissionCache[$object->getId()])) {
             return $this->permissionCache[$object->getId()];
         }
@@ -98,6 +110,11 @@ class Service
         return $mergedPermissions;
     }
 
+    protected function getCustomPermissions(CustomProviderInterface $provider, ?UserInterface $user = null): array
+    {
+        return $provider->getPermissionProvider()->getPermissions($provider, $user);
+    }
+
     /**
      * Base permissions take precedence when explicitly set to allow or deny.
      * Optimistic merging is used for nested permissions. Once allowed a permission stays allowed.
@@ -112,7 +129,7 @@ class Service
         array $mergedPermissions,
         array $basePermissions,
         array $nestedPermissions
-    ) {
+    ): array {
         foreach ($nestedPermissions as $key => $value) {
             if (
                 (($basePermissions[$key] ?? null) === self::INHERIT || !array_key_exists($key, $basePermissions))
@@ -128,23 +145,28 @@ class Service
     /**
      * checks if given object is allowed for given resource
      *
-     * @param Concrete $object
+     * @param Concrete|CustomProviderInterface $object
      * @param string $resource
-     *
+     * @param UserInterface|null $user
      * @return bool
+     * @throws Exception
      */
-    public function isAllowed(Concrete $object, $resource): bool
+    public function isAllowed(Concrete|CustomProviderInterface $object, string $resource, ?UserInterface $user = null): bool
     {
-        $permissions = $this->getPermissions($object);
-
+        $permissions = $this->getPermissions($object, [], $user);
+        // check for custom provider to have a custom check for allowed
+        if ($object instanceof CustomProviderInterface) {
+            return $object->getPermissionProvider()->isAllowed($permissions, $object, $resource);
+        }
         return ($permissions[$resource] ?? false) == self::ALLOW;
     }
 
     /**
-     * @param Concrete|Objectbrick\Data\AbstractData $object
-     * @param ClassDefinition\Data $fieldDefinition
+     * @param AbstractModel $object
+     * @param Data $fieldDefinition
      *
      * @return array
+     * @throws Exception
      */
     protected function getPermissionsByFieldDefinition(
         AbstractModel $object,
